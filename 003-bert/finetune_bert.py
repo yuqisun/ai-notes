@@ -67,3 +67,106 @@ encodings = tokenize_function(texts)
 print(encodings["input_ids"].shape)  # (样本数, max_length)
 print(encodings["attention_mask"].shape)
 
+# 创建 Dataset 和 DataLoader
+# 我们可以直接使用 HuggingFace 的 Dataset 对象
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+class IntentDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_length=64):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+        encoding = self.tokenizer(
+            text,
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        # 去掉 batch 维度
+        item = {key: val.squeeze(0) for key, val in encoding.items()}
+        item["labels"] = torch.tensor(label, dtype=torch.long)
+        return item
+
+# 创建数据集
+dataset = IntentDataset(texts, labels_encoded, tokenizer)
+print("数据集sample:", dataset[0:5])  # 查看第一个样本的内容
+dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+print("数据集大小:", len(dataset))
+print("批次数量:", len(dataloader))
+
+# 设置训练参数并训练
+# 使用 HuggingFace Trainer
+from transformers import Trainer, TrainingArguments
+from datasets import Dataset as HFDataset
+
+# 转换为 HuggingFace Dataset
+hf_dataset = HFDataset.from_dict({
+    "input_ids": encodings["input_ids"],
+    "attention_mask": encodings["attention_mask"],
+    "labels": labels_encoded
+})
+
+training_args = TrainingArguments(
+    output_dir="./results",
+    num_train_epochs=10,               # 小数据可以多训练几轮
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=4,
+    warmup_steps=20,
+    weight_decay=0.01,
+    # logging_dir="./logs",
+    logging_steps=5,
+    eval_strategy="epoch",             # 每个 epoch 评估一次
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model="accuracy",
+)
+
+def compute_metrics(pred):
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+    accuracy = (labels == preds).mean()
+    return {"accuracy": accuracy}
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=hf_dataset,
+    eval_dataset=hf_dataset,          # 简单起见用同一份数据演示
+    processing_class=tokenizer,
+    compute_metrics=compute_metrics,
+)
+
+trainer.train()
+
+# 预测新文本
+def predict_intent(text):
+    model.eval()
+    encoding = tokenizer(
+        text,
+        padding="max_length",
+        truncation=True,
+        max_length=64,
+        return_tensors="pt"
+    ).to('cpu')
+
+    with torch.no_grad():
+        outputs = model(**encoding)
+        logits = outputs.logits
+        pred = torch.argmax(logits, dim=-1).item()
+
+    intent = label_encoder.inverse_transform([pred])[0]
+    return intent
+
+# 测试
+print(predict_intent("我要申请退款"))
+print(predict_intent("我的快递到哪了"))
